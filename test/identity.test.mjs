@@ -108,6 +108,24 @@ test("the loader never lets a caller's headers replace the app identity", async 
   expect(sent.headers["accept-encoding"]).toBe("identity")
 })
 
+test("a key the AI SDK would put in x-api-key is dropped, never sent", async () => {
+  mock = startMock({ pendingPolls: [] })
+  const hooks = await plugin.server({}, { baseUrl: mock.baseUrl })
+  const record = await (await hooks.auth.methods[0].authorize()).callback()
+  const loader = await hooks.auth.loader(async () => record)
+
+  await loader.fetch(`${mock.baseUrl}/llm/v1/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-api-key": "slk_test_key" },
+    body: JSON.stringify({ model: "deepseek-flash", messages: [] }),
+  })
+  const sent = mock.requests("/chat/completions").at(-1)
+  // The gateway ignores x-api-key and reads such a request as anonymous, so it
+  // must not travel at all: the key goes in Authorization, as the app sends it.
+  expect(sent.headers["x-api-key"]).toBeUndefined()
+  expect(sent.headers.authorization).toBe("Bearer slk_test_key")
+})
+
 test("an account with no key gets no loader and no usage", async () => {
   const hooks = await plugin.server({}, undefined)
   expect(await hooks.auth.loader(async () => null)).toEqual({})

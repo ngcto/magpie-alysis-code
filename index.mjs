@@ -530,24 +530,65 @@ function resetMoment(billing, paid) {
 // ---------------------------------------------------------------------------
 // Models
 // ---------------------------------------------------------------------------
-function modelEntry(id, gateway) {
+// A model's facts come from the snapshot whatever hook asks for it, but the two
+// hooks spell a model differently and only one of them decides the wire.
+function modelFacts(id) {
   const known = CATALOG[id] || {}
-  const entry = {
+  return {
     name: known.name || id,
-    limit: { context: known.context || 128_000, output: known.output || 32_768 },
+    context: known.context || 128_000,
+    output: known.output || 32_768,
+    vision: known.vision === true,
+    wire: known.wire || CHAT,
+  }
+}
+
+// The config hook's model, where OpenCode puts the dialect on the model's
+// `provider`. This is the list magpie has before anyone signs in.
+function configModel(id, gateway) {
+  const facts = modelFacts(id)
+  const model = {
+    name: facts.name,
+    limit: { context: facts.context, output: facts.output },
     reasoning: true,
     tool_call: true,
   }
-  if (known.vision) entry.modalities = { input: ["text", "image"] }
-  // Only the models that aren't chat completions need to say so; the provider
-  // already declares chat completions.
-  if (known.wire) entry.provider = { npm: known.wire, api: gateway }
-  return entry
+  if (facts.vision) model.modalities = { input: ["text", "image"] }
+  if (facts.wire !== CHAT) model.provider = { npm: facts.wire, api: gateway }
+  return model
 }
 
-function modelsFromIds(ids, gateway) {
+// The models hook's model, in OpenCode's Model shape, where the dialect is the
+// model's own `api.npm`. This is the one that decides the wire: the host
+// replaces the provider's models with what this hook returns
+// (internal/plugin/host.js: out.models = …), so the dialect is read from
+// `m.api.npm` (host.js) and lands in plugin.Model.NPM for the gateway's
+// pluginProtocol switch (internal/provider/plugins.go). A dialect left only on
+// the config hook is lost the moment an account signs in.
+function accountModel(id, gateway) {
+  const facts = modelFacts(id)
+  return {
+    id,
+    name: facts.name,
+    api: { id, npm: facts.wire, url: gateway },
+    limit: { context: facts.context, output: facts.output },
+    capabilities: {
+      reasoning: true,
+      toolcall: true,
+      input: facts.vision ? { text: true, image: true } : { text: true },
+    },
+  }
+}
+
+function configModels(gateway) {
   const out = {}
-  for (const id of ids) out[id] = modelEntry(id, gateway)
+  for (const id of Object.keys(CATALOG)) out[id] = configModel(id, gateway)
+  return out
+}
+
+function accountModels(ids, gateway) {
+  const out = {}
+  for (const id of ids) out[id] = accountModel(id, gateway)
   return out
 }
 
@@ -571,7 +612,7 @@ export default {
   id: "magpie-alysis-code",
   async server(_input, options) {
     const ctx = endpoints(options)
-    const baseModels = modelsFromIds(Object.keys(CATALOG), ctx.gateway)
+    const baseModels = configModels(ctx.gateway)
 
     return {
       config: async (config) => {
@@ -616,6 +657,11 @@ export default {
               if (!headers.has("content-type") && init.body != null) {
                 headers.set("content-type", "application/json")
               }
+              // The app never sends a key as x-api-key: the gateway ignores
+              // that header and answers as if anonymous, so a request carrying
+              // it reads as signed out. Anthropic's AI SDK package adds it on
+              // the Messages route; it is dropped again here.
+              headers.delete("x-api-key")
               // The two Claude models are served on Anthropic Messages, which
               // wants its version pin (anthropic_messages.py:78).
               if (String(url).includes("/messages")) headers.set("anthropic-version", "2023-06-01")
@@ -678,7 +724,7 @@ export default {
           if (!res.ok) return provider.models
           const ids = modelIds(res.body)
           if (!ids || !ids.length) return provider.models
-          return modelsFromIds(ids, ctx.gateway)
+          return accountModels(ids, ctx.gateway)
         },
       },
     }
@@ -703,6 +749,8 @@ export const _internal = {
   s256,
   usageFromStatus,
   modelIds,
-  modelsFromIds,
-  modelEntry,
+  configModel,
+  accountModel,
+  configModels,
+  accountModels,
 }

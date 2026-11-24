@@ -64,21 +64,42 @@ test("every declared model carries a window and what it can do", async () => {
   expect(models["glm-5.3"].modalities).toBeUndefined()
 })
 
-test("each model speaks the dialect the gateway serves it on", () => {
-  // The gateway is one base URL over three wire APIs, and the app picks one by
-  // model id (src/alysis_code/llm/factory.py:390-400). magpie chooses by the AI
-  // SDK package named on the model.
-  const usage = (id) => _internal.modelEntry(id, "https://gateway.test/llm/v1").provider
+// The gateway is one base URL over three wire APIs, and the app picks one by
+// model id (src/alysis_code/llm/factory.py:390-400). magpie picks it from the
+// AI SDK package named on the model, and the two hooks spell that differently.
+const RESPONSES_IDS = ["gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"]
+const ANTHROPIC_IDS = ["claude-sonnet-5-5", "claude-haiku-5-5"]
+const CHAT_IDS = ["deepseek-flash", "glm-5.3-flash", "kimi-k3", "gemini-4-carbon"]
+const GW = "https://gateway.test/llm/v1"
 
-  for (const id of ["gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra"]) {
-    expect(usage(id)).toEqual({ npm: "@ai-sdk/openai", api: "https://gateway.test/llm/v1" })
+test("the config hook names each model's dialect in its provider field", () => {
+  for (const id of RESPONSES_IDS) {
+    expect(_internal.configModel(id, GW).provider).toEqual({ npm: "@ai-sdk/openai", api: GW })
   }
-  for (const id of ["claude-sonnet-5-5", "claude-haiku-5-5"]) {
-    expect(usage(id)).toEqual({ npm: "@ai-sdk/anthropic", api: "https://gateway.test/llm/v1" })
+  for (const id of ANTHROPIC_IDS) {
+    expect(_internal.configModel(id, GW).provider).toEqual({ npm: "@ai-sdk/anthropic", api: GW })
   }
   // Everything else is chat completions, which the provider already declares.
-  for (const id of ["deepseek-flash", "glm-5.3-flash", "kimi-k3", "gemini-4-carbon"]) {
-    expect(usage(id)).toBeUndefined()
+  for (const id of CHAT_IDS) expect(_internal.configModel(id, GW).provider).toBeUndefined()
+})
+
+test("the models hook names it on the model's own api, which is what magpie reads", () => {
+  // The host replaces the provider's models with this hook's return
+  // (internal/plugin/host.js: out.models = …) and takes the dialect from
+  // m.api.npm, so this — not the config hook — is what reaches
+  // plugin.Model.NPM and the gateway's pluginProtocol switch.
+  for (const id of RESPONSES_IDS) {
+    expect(_internal.accountModel(id, GW).api).toEqual({ id, npm: "@ai-sdk/openai", url: GW })
+  }
+  for (const id of ANTHROPIC_IDS) {
+    expect(_internal.accountModel(id, GW).api).toEqual({ id, npm: "@ai-sdk/anthropic", url: GW })
+  }
+  for (const id of CHAT_IDS) {
+    expect(_internal.accountModel(id, GW).api).toEqual({
+      id,
+      npm: "@ai-sdk/openai-compatible",
+      url: GW,
+    })
   }
 })
 

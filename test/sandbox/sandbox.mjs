@@ -21,7 +21,7 @@ const magpie = process.argv[2] || join(process.env.HOME || "", ".capy/work/magpi
 const mock = startMock({
   pendingPolls: ["pending", "pending", "approved"],
   billing: paidBilling(),
-  models: ["gpt-6-luna", "deepseek-flash"],
+  models: ["gpt-6-luna", "claude-haiku-5-5", "deepseek-flash", "glm-5.3-flash"],
 })
 
 const home = mkdtempSync(join(tmpdir(), "alysis-sandbox-"))
@@ -91,15 +91,37 @@ try {
   expect(signed?.accountId === "ada@example.com", "the account is named by its email")
   // The account's own listing is the model list, not the plugin's snapshot.
   expect(
-    signed?.models?.map((m) => m.id).join(",") === "gpt-6-luna,deepseek-flash",
+    signed?.models?.map((m) => m.id).join(",") ===
+      "gpt-6-luna,claude-haiku-5-5,deepseek-flash,glm-5.3-flash",
     "the account's listing decides the models",
   )
+
+  // Each model keeps the wire its vendor serves it on. The models hook's list
+  // replaces the provider's, so a dialect left only on the config hook is lost
+  // here — which is exactly the bug this check exists for.
+  const npmOf = Object.fromEntries(signed.models.map((m) => [m.id, m.npm]))
+  expect(npmOf["gpt-6-luna"] === "@ai-sdk/openai", "gpt-6-luna keeps the Responses dialect")
+  expect(npmOf["claude-haiku-5-5"] === "@ai-sdk/anthropic", "claude-haiku-5-5 keeps the Anthropic dialect")
+  expect(npmOf["deepseek-flash"] === "@ai-sdk/openai-compatible", "deepseek-flash is chat completions")
+  expect(npmOf["glm-5.3-flash"] === "@ai-sdk/openai-compatible", "glm-5.3-flash is chat completions")
+  // And what the model can do, which the same replacement would have dropped.
+  const luna = signed.models.find((m) => m.id === "gpt-6-luna")
+  expect(luna?.reasoning === true && luna?.image === true, "gpt-6-luna keeps its capabilities")
+  expect(luna?.context === 1_050_000, "gpt-6-luna keeps its context window")
 
   const test = await run(["provider", "test", "alysis-code"])
   expect(/✓|ok|passed/i.test(test) && !/✗|failed/i.test(test), "magpie sends a request through the loader")
 
   const quota = await run(["quota"])
   expect(/37%|37\s*\/\s*100|credits/.test(quota), "magpie reads the credits allowance")
+
+  // The editor and `magpie model api` read the provider's bases per API; all
+  // three show once the models carry their own dialects.
+  const lunaApi = await run(["model", "api", "alysis-code/gpt-6-luna"])
+  const haikuApi = await run(["model", "api", "alysis-code/claude-haiku-5-5"])
+  expect(lunaApi.includes("vendor's list says, responses"), "magpie model api reports responses for gpt-6-luna")
+  expect(haikuApi.includes("vendor's list says, anthropic"), "magpie model api reports anthropic for claude-haiku-5-5")
+  expect(lunaApi.includes("chat, responses, anthropic"), "the provider offers all three APIs")
 
   const chat = mock.requests("/chat/completions").at(-1)
   expect(chat?.headers["user-agent"] === "alysis-code/0.1.0", "the request carried the app's user agent")
@@ -108,11 +130,31 @@ try {
   const status = mock.requests("/account-status").at(-1)
   expect(status?.headers["user-agent"] === "alysis-code/0.1.0", "the usage read carried the app's user agent")
 
+  // Every dialect magpie speaks on this provider carries the same app identity,
+  // and the Anthropic one carries its version pin.
+  for (const [route, what] of [
+    ["/llm/v1/responses", "the Responses request"],
+    ["/llm/v1/messages", "the Anthropic request"],
+  ]) {
+    const call = mock.requests(route).at(-1)
+    expect(call?.headers["user-agent"] === "alysis-code/0.1.0", `${what} carried the app's user agent`)
+    expect(call?.headers["accept-encoding"] === "identity", `${what} asked for no encoding`)
+    expect(call?.headers.authorization === "Bearer slk_test_key", `${what} carried the account's key`)
+  }
+  expect(mock.state.sawAnthropicVersion === "2023-06-01", "the Anthropic request carried its version pin")
+  expect(!mock.requests("/llm/v1/messages").at(-1)?.headers["x-api-key"], "the key is never sent as x-api-key")
+
   const authFile = join(home, ".config/magpie/plugin-auth.json")
   const saved = JSON.parse(readFileSync(authFile, "utf8"))
   const record = saved["alysis-code"]
   expect(record?.type === "api" && record?.key === "slk_test_key", "the sign-in is kept as the key")
   expect(record?.metadata?.email === "ada@example.com", "the account is named by its email in metadata")
+
+  // The same, from the file magpie caches so it can start without asking the
+  // plugin — the record the Captain inspected.
+  const cached = JSON.parse(readFileSync(join(home, ".config/magpie/plugin-providers.json"), "utf8"))
+  const rows = JSON.stringify(cached)
+  expect(rows.includes("@ai-sdk/openai") && rows.includes("@ai-sdk/anthropic"), "the cache keeps both dialects")
 } finally {
   mock.close()
   console.log(`\nsandbox HOME: ${home}`)

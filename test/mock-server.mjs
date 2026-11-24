@@ -10,6 +10,12 @@ const json = (body, status = 200) =>
     headers: { "content-type": "application/json" },
   })
 
+const sse = (frames) =>
+  new Response(frames.join(""), {
+    status: 200,
+    headers: { "content-type": "text/event-stream", "cache-control": "no-store" },
+  })
+
 /**
  * Start the stand-in.
  *
@@ -116,6 +122,58 @@ export function startMock(plan = {}) {
           usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
         }
         return json(answer)
+      }
+
+      // The two other wire APIs the gateway serves on the same base. magpie
+      // reaches these only when a model declares the dialect, which is the
+      // thing the sandbox checks.
+      if (url.pathname.endsWith("/llm/v1/responses")) {
+        const answer = {
+          id: "resp_1",
+          object: "response",
+          created_at: 1_700_000_000,
+          status: "completed",
+          model: body?.model,
+          output: [
+            {
+              type: "message",
+              id: "msg_1",
+              role: "assistant",
+              status: "completed",
+              content: [{ type: "output_text", text: state.chatAnswer, annotations: [] }],
+            },
+          ],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        }
+        if (body?.stream !== true) return json(answer)
+        const frames = [
+          { type: "response.output_text.delta", delta: state.chatAnswer, item_id: "msg_1", output_index: 0, content_index: 0 },
+          { type: "response.completed", response: answer },
+        ]
+        return sse(frames.map((f) => `event: ${f.type}\ndata: ${JSON.stringify(f)}\n\n`))
+      }
+
+      if (url.pathname.endsWith("/llm/v1/messages")) {
+        state.sawAnthropicVersion = request.headers.get("anthropic-version") || ""
+        const answer = {
+          id: "msg_1",
+          type: "message",
+          role: "assistant",
+          model: body?.model,
+          content: [{ type: "text", text: state.chatAnswer }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }
+        if (body?.stream !== true) return json(answer)
+        const frames = [
+          ["message_start", { type: "message_start", message: { ...answer, content: [] } }],
+          ["content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }],
+          ["content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: state.chatAnswer } }],
+          ["content_block_stop", { type: "content_block_stop", index: 0 }],
+          ["message_delta", { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 1 } }],
+          ["message_stop", { type: "message_stop" }],
+        ]
+        return sse(frames.map(([name, data]) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`))
       }
 
       return json({ error: { message: `no route for ${url.pathname}` } }, 404)

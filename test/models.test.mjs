@@ -16,16 +16,23 @@ test("the gateway's listing is the account's model list", async () => {
   const models = await hooks.provider.models({ models: {} }, { auth: account })
 
   expect(Object.keys(models)).toEqual(["gpt-6-luna", "deepseek-flash", "some-new-model"])
+  // OpenCode's Model shape: the dialect on api.npm and the capabilities where
+  // magpie reads them, because this return replaces the provider's models.
   expect(models["gpt-6-luna"]).toMatchObject({
+    id: "gpt-6-luna",
     name: "GPT-6 Luna",
+    api: { id: "gpt-6-luna", npm: "@ai-sdk/openai", url: `${mock.baseUrl}/llm/v1` },
     limit: { context: 1_050_000, output: 128_000 },
-    reasoning: true,
-    tool_call: true,
+    capabilities: { reasoning: true, toolcall: true, input: { text: true, image: true } },
   })
-  // A model the snapshot doesn't describe still works, with a conservative window.
+  expect(models["deepseek-flash"].api.npm).toBe("@ai-sdk/openai-compatible")
+  // A model the snapshot doesn't describe still works, with a conservative
+  // window, on the default dialect.
   expect(models["some-new-model"]).toMatchObject({
     name: "some-new-model",
+    api: { npm: "@ai-sdk/openai-compatible" },
     limit: { context: 128_000, output: 32_768 },
+    capabilities: { input: { text: true } },
   })
 
   const [call] = mock.requests("/llm/v1/models")

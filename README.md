@@ -70,8 +70,12 @@ These are the literals the app itself sends (`llm/openai_compat.py:2518`,
 `:178`, `:357-361`; `anthropic_messages.py:78`, `:1634`). `accept-encoding:
 identity` is not cosmetic: a compressed stream moves chunk boundaries, and a
 `data:` frame split across a decode boundary breaks streaming.
+
 `x-api-key` does **not** authenticate here — the gateway ignores it and answers
 as if anonymous — so the key goes in `Authorization` even on the Anthropic route.
+Anthropic's AI SDK package adds `x-api-key` on its own, so the loader **deletes
+that header** before the request leaves; a request carrying it would read as
+signed out.
 
 ## Models and wire dialects
 
@@ -90,6 +94,23 @@ Which models an account may use is the gateway's authenticated listing
 each model's context window, output window and image support. A model the
 listing names that the snapshot doesn't describe still works, with a
 conservative 128K/32K window.
+
+**Where the dialect has to be written, and why it is easy to get wrong.** The
+two hooks spell a model differently, and only one of them decides the wire:
+
+- the `config` hook puts the dialect on `provider.npm` — this is what magpie
+  shows before anyone signs in;
+- the `models` hook returns OpenCode's `Model`, where it is `api.npm`.
+
+The host **replaces** a provider's model map with what the `models` hook returns
+(`internal/plugin/host.js:2274`), and takes each model's package from
+`m.api.npm` (`:2669`), which becomes `plugin.Model.NPM` and drives the gateway's
+dialect switch (`internal/provider/plugins.go`, `pluginProtocol`). So a dialect
+set only in the `config` hook is silently lost the moment an account signs in,
+and every model falls back to chat completions — which the vendor refuses for
+those five with `400 · Luna uses /v1/responses for reasoning and tools.` Both
+spellings are set here, and the sandbox check reads the cached
+`plugin-providers.json` to confirm the per-model `npm` survives sign-in.
 
 **Reasoning levels are not offered.** The effort values differ per model
 (`low/high/max` for DeepSeek, `low/medium/high` for Gemini, `low` alone for
@@ -125,12 +146,26 @@ renews soonest") instead of being a provider routing can't see.
 
 Verified, with the evidence in this repository:
 
-- `bun test` — 41 tests against a stand-in Alysis cloud (`test/mock-server.mjs`)
-  that record the exact headers each call carries.
-- `bun test/sandbox/sandbox.mjs <magpie-binary>` — a real magpie in a throwaway
-  `HOME` loads the plugin, signs an account in through the device flow, keeps
-  the sign-in, lists the account's models, sends a request through the loader
-  and reads the allowance. It prints `magpie quota` as
+- `bun test` — 43 tests against a stand-in Alysis cloud (`test/mock-server.mjs`)
+  that records the exact headers each call carries.
+- `bun test/sandbox/sandbox.mjs <magpie-binary>` — 36 checks against a real
+  magpie in a throwaway `HOME`: it loads the plugin, signs an account in through
+  the device flow, keeps the sign-in, lists the account's models, sends a
+  request through the loader and reads the allowance. All three dialects are
+  exercised and the cached provider record is read per model:
+
+  ```
+  $ magpie provider test alysis-code
+  ✓ chat       2 ms · deepseek-flash
+    ✓ responses  0 ms · gpt-6-luna
+    ✓ anthropic  0 ms · claude-haiku-5-5
+
+  $ magpie model api alysis-code/gpt-6-luna
+  alysis-code/gpt-6-luna · auto: as its vendor's list says, responses
+    · alysis-code has chat, responses, anthropic
+  ```
+
+  and `magpie quota` prints
   `alysis-code · Pro · renews Nov 28 · ada@example.com  subscription  5h 37% (37 / 100 credits)  7d 25% (200 / 800 credits)  30d 20% (1,200 / 6,000 credits) ↻4d4h  Balance 1,240 credits left`.
 - The icon URL (`https://alysiscode.com/black-logo.png`) answers 200 with a
   512×512 PNG, and magpie reports it as the provider's icon
@@ -143,9 +178,11 @@ Verified, with the evidence in this repository:
   tier's caps from its public price catalog);
 - that a real sign-in returns the key at the end of the device flow, and that
   `/connect` hands the browser back as expected;
-- that inference on `/responses` and `/messages` works through magpie's
-  translation for the five models that use them — the dialect mapping itself is
-  read from the vendor's source (`llm/factory.py:390-400`), not from a live call;
+- that inference on `/responses` and `/messages` is **accepted by the real
+  gateway**, not just routed to the right path. magpie now sends those requests
+  to `/llm/v1/responses` and `/llm/v1/messages` with the app's headers (checked),
+  and the vendor's own 400 named exactly those paths, but whether the body
+  magpie builds for each is one the gateway takes has not been tested live;
 - that `5 hours`/`7 days` windows without `resetsAt` order accounts the way
   Smart routing intends. They carry no invented reset, which is the honest
   reading, but it is a choice worth revisiting with two real accounts side by
@@ -153,12 +190,15 @@ Verified, with the evidence in this repository:
 
 ## The most likely thing to break
 
-The five models on `/responses` and `/messages`. Everything else is a plain
-OpenAI-compatible call, which magpie already does for hundreds of providers; the
-Responses and Anthropic translations are the paths where magpie's request shape
-and the vendor's gateway must agree, and neither has been exercised against a
-live account. If those five misbehave, the plugin still works for the other
-eighteen by removing `wire` from those entries in `CATALOG` — a two-line change.
+The request bodies magpie builds for `/responses` and `/messages`. The dialect
+*routing* is now fixed and checked — magpie sends those five models to the right
+paths with the right headers, and the vendor's refusal named those same paths.
+What remains untested is whether magpie's translated body for those two APIs is
+one the gateway accepts, which needs a live account. If a model there misbehaves,
+removing `wire` from its `CATALOG` entry falls back to chat completions in a
+one-line change, but the vendor refuses chat completions for these five, so the
+honest fallback is to leave that model out rather than send it down a path the
+gateway has already rejected.
 
 ## Development
 
@@ -167,9 +207,10 @@ bun test                              # unit tests against the stand-in
 bun test/sandbox/sandbox.mjs <magpie> # a real magpie, in a sandbox HOME
 ```
 
-`test/mock-server.mjs` answers the shapes the vendor's own client reads
-(`src/alysis_code/account_login.py`, `alysis_cloud.py`) and records every
-request, so the header set is asserted rather than assumed.
+`test/mock-server.mjs` answers all three wire APIs the vendor's client reads
+(`src/alysis_code/account_login.py`, `alysis_cloud.py`, `llm/factory.py`) and
+records every request, so both the header set and the dialect each model is sent
+on are asserted rather than assumed.
 
 Nothing here touches a real `~/.config/magpie`: the sandbox script gives every
 magpie call its own `HOME`.
