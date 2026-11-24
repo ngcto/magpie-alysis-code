@@ -1,0 +1,32 @@
+{
+  "name": "magpie-alysis-code",
+  "version": "0.1.0",
+  "description": "magpie provider plugin: signs in to an Alysis Code account the way the Alysis Code app does, and serves its hosted model gateway with credits as the allowance",
+  "type": "module",
+  "main": "./index.mjs",
+  "files": [
+    "index.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "magpie",
+    "magpie-plugin",
+    "alysis",
+    "alysis-code"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "test": "bun test"
+  },
+  "magpie": {
+    "name": "Alysis Code",
+    "summary": {
+      "en": "Sign in to an Alysis Code account and use its hosted models, with credits as the allowance."
+    },
+    "icon": "https://alysiscode.com/black-logo.png",
+    "maxConcurrency": 4
+  }
+}
