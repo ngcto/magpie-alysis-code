@@ -30,12 +30,16 @@ mkdirSync(join(home, ".config/magpie"), { recursive: true })
 // Async on purpose: the stand-in serves from this same process, and a blocking
 // spawn would hold the event loop it needs to answer magpie's requests.
 async function run(args, { quiet = false } = {}) {
+  return runWith(home, args, { quiet })
+}
+
+async function runWith(where, args, { quiet = false } = {}) {
   const proc = Bun.spawn([magpie, ...args], {
     env: {
       ...process.env,
-      HOME: home,
-      XDG_CONFIG_HOME: join(home, ".config"),
-      XDG_CACHE_HOME: join(home, ".cache"),
+      HOME: where,
+      XDG_CONFIG_HOME: join(where, ".config"),
+      XDG_CACHE_HOME: join(where, ".cache"),
       MAGPIE_ADDR: "127.0.0.1:3499",
     },
     stdin: "ignore",
@@ -75,14 +79,18 @@ try {
   const listed = await run(["plugin", "--json"])
   const provider = jsonOf(listed).providers.find((p) => p.id === "alysis-code")
   expect(provider?.name === "Alysis Code", "the provider is named Alysis Code")
-  expect(provider?.methods?.length === 2, "both sign-in methods reach magpie")
+  expect(provider?.methods?.length === 1, "the device code is the only sign-in method offered")
+  expect(
+    provider?.methods?.[0]?.label === "Sign in with Alysis Code",
+    "that method reads as the one way in",
+  )
   expect(provider?.icon === "https://alysiscode.com/black-logo.png", "the icon URL reaches magpie")
   expect(provider?.usage === true, "magpie sees the usage hook")
   expect(provider?.signedIn === false, "nothing is signed in yet")
 
-  // Method 1 is the device flow; magpie numbers its methods in the order the
-  // plugin lists them (internal/cli/plugins_cli.go: pluginLogin).
-  const login = await run(["plugin", "login", "alysis-code", "1"])
+  // The only method needs no number: magpie asks only when a plugin offers more
+  // than one (internal/cli/plugins_cli.go: pluginLogin).
+  const login = await run(["plugin", "login", "alysis-code"])
   expect(/signed in|Signed in|✓/.test(login), "magpie signs the account in through the device flow")
 
   const after = await run(["plugin", "--json"])
@@ -155,6 +163,26 @@ try {
   const cached = JSON.parse(readFileSync(join(home, ".config/magpie/plugin-providers.json"), "utf8"))
   const rows = JSON.stringify(cached)
   expect(rows.includes("@ai-sdk/openai") && rows.includes("@ai-sdk/anthropic"), "the cache keeps both dialects")
+  // A sign-in kept by the earlier build must go on working: the record shape is
+  // untouched, so a home with auth and no login run still sends and reads.
+  const carried = mkdtempSync(join(tmpdir(), "alysis-carried-"))
+  await runWith(carried, ["plugin", "add", repo], { quiet: true })
+  const carriedJson = join(carried, ".config/magpie/plugins.json")
+  const carriedPlugins = JSON.parse(readFileSync(carriedJson, "utf8"))
+  carriedPlugins.plugins[0].options = { baseUrl: mock.baseUrl }
+  writeFileSync(carriedJson, JSON.stringify(carriedPlugins, null, 2))
+  // exactly what the plugin returned and magpie saved before this change
+  writeFileSync(
+    join(carried, ".config/magpie/plugin-auth.json"),
+    JSON.stringify({
+      "alysis-code": { type: "api", key: "slk_test_key", metadata: { email: "ada@example.com" } },
+    }),
+    { mode: 0o600 },
+  )
+  const carriedTest = await runWith(carried, ["provider", "test", "alysis-code"])
+  expect(/✓ chat/.test(carriedTest) && !/not signed in/.test(carriedTest), "a kept sign-in still works, with no re-login")
+  const carriedQuota = await runWith(carried, ["quota"])
+  expect(/credits/.test(carriedQuota), "a kept sign-in still reports its allowance")
 } finally {
   mock.close()
   console.log(`\nsandbox HOME: ${home}`)

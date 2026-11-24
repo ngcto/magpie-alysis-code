@@ -8,20 +8,16 @@
 //
 // Everything here follows AlysisAi/AlysisCode (Apache-2.0):
 //   src/alysis_code/alysis_cloud.py      — the cloud, gateway and function URLs
-//   src/alysis_code/account_login.py     — the device flow, the /connect flow,
-//                                          /account-status and its credit fields
+//   src/alysis_code/account_login.py     — the device flow, /account-status and
+//                                          its credit fields
 //   src/alysis_code/llm/openai_compat.py — the headers a request carries
 //   src/alysis_code/device_identity.py   — the per-installation id
 //   src/alysis_code/model_registry.py    — the hosted catalog's capacities
 //
-// Sign-in is OAuth-shaped in both of its methods: a device code approved on the
-// website (no browser plumbing, works in a container), and the website's
-// /connect page whose loopback redirect the user can paste back when the
-// browser is on another machine. The key either one returns (``slk_…``) is
+// Sign-in is a device code approved on the website: no browser plumbing on this
+// machine, so it works in a container. The key it returns (``slk_…``) is
 // long-lived: the vendor issues no refresh token and no expiry, so there is
 // nothing for the plugin to renew.
-
-import { createHash } from "node:crypto"
 
 const PROVIDER_ID = "alysis-code"
 const PROVIDER_NAME = "Alysis Code"
@@ -287,94 +283,6 @@ async function deviceSignIn(ctx, identity) {
 }
 
 // ---------------------------------------------------------------------------
-// Sign-in: the website's /connect page, with a pasted callback URL
-// ---------------------------------------------------------------------------
-// The app opens /connect and the website sends the browser back to a loopback
-// port on this computer. When magpie runs where that port can't be reached —
-// another machine, a container — the user copies the address bar the browser
-// failed to load and pastes it here instead. magpie's code field is that paste
-// box, so the callback takes either the whole URL or the bare code
-// (account_login.py: _browser_sign_in).
-function pastedCode(input) {
-  const text = String(input || "").trim()
-  if (!text) return ""
-  const match = /[?&]code=([^&\s#]+)/.exec(text)
-  const value = match ? match[1] : text
-  try {
-    return decodeURIComponent(value)
-  } catch {
-    return value
-  }
-}
-
-// RFC 7636: a 64-character verifier from the unreserved set and its SHA-256
-// base64url digest without padding (account_login.py: _s256, token_urlsafe(48)).
-function s256(verifier) {
-  return base64url(new Uint8Array(createHash("sha256").update(verifier).digest()))
-}
-
-function pkcePair() {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
-  const bytes = crypto.getRandomValues(new Uint8Array(64))
-  let verifier = ""
-  for (const byte of bytes) verifier += alphabet[byte % alphabet.length]
-  return { verifier, challenge: s256(verifier) }
-}
-
-async function connectSignIn(ctx, identity) {
-  const { verifier, challenge } = pkcePair()
-  const state = base64url(crypto.getRandomValues(new Uint8Array(24)))
-  // A loopback port the website will send the browser to. Nothing listens on it:
-  // the user pastes what the browser lands on, and a listener would only help
-  // when the browser is on this very machine.
-  const port = 49152 + (crypto.getRandomValues(new Uint16Array(1))[0] % 16384)
-  const started = await postJson(`${ctx.cloud}/desktop-sign-in`, {
-    action: "start",
-    code_challenge: challenge,
-    redirect_port: port,
-    state,
-    client_name: identity.clientName,
-    installation_id: identity.installationId,
-  })
-  if (!started.ok) throw new Error(errorText(started, "Starting the sign-in failed"))
-  const sessionId = String(started.body?.session_id || "").trim()
-  if (!sessionId) {
-    throw new Error(
-      "The Alysis Code login service did not return a sign-in session. Use the other sign-in method.",
-    )
-  }
-  return {
-    url: `${ctx.site}/connect?session=${encodeURIComponent(sessionId)}`,
-    instructions:
-      "Sign in on the website, then paste the callback URL the browser lands on (it starts with http://127.0.0.1).",
-    method: "code",
-    async callback(code, { signal } = {}) {
-      const pasted = pastedCode(code)
-      if (!pasted) throw new Error("No callback code was given.")
-      const res = await postJson(
-        `${ctx.cloud}/desktop-sign-in`,
-        { action: "token", code: pasted, code_verifier: verifier },
-        { signal },
-      )
-      if (!res.ok) throw new Error(errorText(res, "Finishing the sign-in failed"))
-      const status = String(res.body?.status || "").trim().toLowerCase()
-      const key = String(res.body?.key || "").trim()
-      if (status === "approved" && key) return completeSignIn(ctx, key)
-      if (status === "approved") {
-        throw new Error("The Alysis Code login service did not return a key.")
-      }
-      throw new Error("This sign-in expired. Sign in again.")
-    },
-  }
-}
-
-function base64url(bytes) {
-  let binary = ""
-  for (const byte of bytes) binary += String.fromCharCode(byte)
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")
-}
-
-// ---------------------------------------------------------------------------
 // Finishing a sign-in
 // ---------------------------------------------------------------------------
 // The key is checked before it is kept, and the account's email goes in the
@@ -635,11 +543,6 @@ export default {
             label: `Sign in with ${PROVIDER_NAME}`,
             authorize: async () => deviceSignIn(ctx, newIdentity()),
           },
-          {
-            type: "oauth",
-            label: `${PROVIDER_NAME} sign-in page (paste the callback URL)`,
-            authorize: async () => connectSignIn(ctx, newIdentity()),
-          },
         ],
 
         // Every request of this account, carrying the app's own header set.
@@ -744,9 +647,6 @@ export const _internal = {
   clientName,
   appHeaders,
   accountState,
-  pastedCode,
-  pkcePair,
-  s256,
   usageFromStatus,
   modelIds,
   configModel,

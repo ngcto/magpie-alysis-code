@@ -13,13 +13,12 @@ async function hooksFor(plan) {
   return plugin.server({}, { baseUrl: mock.baseUrl })
 }
 
-test("both sign-in methods are oauth, one of them the paste-the-callback path", async () => {
+test("the device code is the only way in", async () => {
   const hooks = await plugin.server({}, undefined)
   const methods = hooks.auth.methods
-  expect(methods).toHaveLength(2)
-  for (const method of methods) expect(method.type).toBe("oauth")
-  expect(methods[0].label).toContain("Alysis Code")
-  expect(methods[1].label.toLowerCase()).toContain("callback url")
+  expect(methods).toHaveLength(1)
+  expect(methods[0].type).toBe("oauth")
+  expect(methods[0].label).toBe("Sign in with Alysis Code")
 })
 
 test("the device sign-in shows the activation page and waits on its own", async () => {

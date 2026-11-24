@@ -16,26 +16,13 @@ Agents then name a model as `alysis-code/gpt-6-luna`.
 
 ## Signing in
 
-One OAuth-shaped way to sign in, in two methods. **Method 1** is a device code:
-magpie shows a code, you approve it at `https://alysiscode.com/activate`, and
-magpie finishes on its own. It needs no browser on the machine magpie runs on,
-which is why it is the default and the one to use in a container.
-
-**Method 2** is the website's own `/connect` page: magpie opens it, you sign in,
-and the browser is sent back to `http://127.0.0.1:<port>/callback?code=…`. When
-magpie runs somewhere that address can't be reached — another machine, Docker,
-a remote box — the page fails to load and **you paste that callback URL into
-magpie's code field**. The plugin reads the `code` out of it and finishes.
+A device code, and nothing else. magpie shows a code, you approve it at
+`https://alysiscode.com/activate`, and the sign-in finishes on its own. It needs
+no browser on the machine magpie runs on, so it works in a container:
 
 ```sh
-magpie plugin login alysis-code 1   # the device code
-magpie plugin login alysis-code 2   # the sign-in page, then paste the callback URL
+magpie plugin login alysis-code
 ```
-
-Two methods rather than one field because magpie's `auth.methods` decides the
-shape: an `oauth` method with `method: "auto"` resolves on its own, and
-`method: "code"` is the one that asks for something pasted. There is no way to
-have the automatic path and a paste box in a single method, so each is its own.
 
 **What is kept.** The plugin returns the `slk_…` gateway key and the account's
 email; magpie stores `{type: "api", key, metadata: {email}}` in
@@ -146,13 +133,15 @@ renews soonest") instead of being a provider routing can't see.
 
 Verified, with the evidence in this repository:
 
-- `bun test` — 43 tests against a stand-in Alysis cloud (`test/mock-server.mjs`)
+- `bun test` — 37 tests against a stand-in Alysis cloud (`test/mock-server.mjs`)
   that records the exact headers each call carries.
-- `bun test/sandbox/sandbox.mjs <magpie-binary>` — 36 checks against a real
-  magpie in a throwaway `HOME`: it loads the plugin, signs an account in through
-  the device flow, keeps the sign-in, lists the account's models, sends a
-  request through the loader and reads the allowance. All three dialects are
-  exercised and the cached provider record is read per model:
+- `bun test/sandbox/sandbox.mjs <magpie-binary>` — 39 checks against a real
+  magpie in a throwaway `HOME`: it loads the plugin, offers one sign-in method,
+  signs an account in through the device flow, keeps the sign-in, lists the
+  account's models, sends a request through the loader and reads the allowance.
+  All three dialects are exercised, the cached provider record is read per
+  model, and a home holding a sign-in but no login run is checked to still
+  work:
 
   ```
   $ magpie provider test alysis-code
@@ -171,34 +160,34 @@ Verified, with the evidence in this repository:
   512×512 PNG, and magpie reports it as the provider's icon
   (`magpie plugin --json`).
 
-**Not verified, because it needs a real Alysis Code account:**
+Also verified live, with a real Alysis Code account in magpie v0.1.4738 — every
+model on its own dialect, with real credits spent:
 
-- that a real `slk_…` key and account-status body have exactly these fields (the
-  field contract comes from the vendor's validator and its tests, and the free
-  tier's caps from its public price catalog);
-- that a real sign-in returns the key at the end of the device flow, and that
-  `/connect` hands the browser back as expected;
-- that inference on `/responses` and `/messages` is **accepted by the real
-  gateway**, not just routed to the right path. magpie now sends those requests
-  to `/llm/v1/responses` and `/llm/v1/messages` with the app's headers (checked),
-  and the vendor's own 400 named exactly those paths, but whether the body
-  magpie builds for each is one the gateway takes has not been tested live;
-- that `5 hours`/`7 days` windows without `resetsAt` order accounts the way
-  Smart routing intends. They carry no invented reset, which is the honest
-  reading, but it is a choice worth revisiting with two real accounts side by
-  side.
+```
+magpie provider test alysis-code
+  ✓ chat       1708 ms · deepseek-flash
+  ✓ responses  2081 ms · gpt-6-luna
+  ✓ anthropic  2321 ms · claude-haiku-5-5
+```
+
+The free-tier allowance read `5h 0/10 · 7d 0/20 · 30d 0/50 · renews Dec 24`,
+which is the vendor's published free tier, and the balance moved 50 → 49.99
+credits. So the sign-in, the `/account-status` field contract, and the
+`/responses` and `/messages` bodies magpie translates are all confirmed against
+the real service.
+
+**Open, and not a defect:** with a single account there is nothing to order, so
+how the two rolling caps (which carry no `resetsAt` by design) weigh against
+another account is untested. Worth a look once two accounts are signed in.
 
 ## The most likely thing to break
 
-The request bodies magpie builds for `/responses` and `/messages`. The dialect
-*routing* is now fixed and checked — magpie sends those five models to the right
-paths with the right headers, and the vendor's refusal named those same paths.
-What remains untested is whether magpie's translated body for those two APIs is
-one the gateway accepts, which needs a live account. If a model there misbehaves,
-removing `wire` from its `CATALOG` entry falls back to chat completions in a
-one-line change, but the vendor refuses chat completions for these five, so the
-honest fallback is to leave that model out rather than send it down a path the
-gateway has already rejected.
+The vendor moving a model to another dialect. The gateway serves three wire APIs
+from one base and picks between them by model id
+(`llm/factory.py:390-400`), so a model the vendor moves to Responses or Messages
+— or a new one it releases there — will fail with a `400` naming the path until
+its `CATALOG` entry carries the matching `wire`. That failure is loud and
+self-describing, and the fix is one word per model.
 
 ## Development
 

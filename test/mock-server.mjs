@@ -30,8 +30,6 @@ export function startMock(plan = {}) {
     polls: 0,
     pending: plan.pendingPolls ?? ["pending", "pending"],
     deviceGrants: new Map(),
-    connectSessions: new Map(),
-    approvedConnectCodes: new Map(),
     billing: plan.billing ?? paidBilling(),
     models: plan.models ?? ["gpt-6-luna", "deepseek-flash", "some-new-model"],
     schemaVersion: plan.schemaVersion ?? 1,
@@ -74,26 +72,6 @@ export function startMock(plan = {}) {
         const next = state.deviceStatus ?? state.pending.shift() ?? "approved"
         if (next === "approved") return json({ status: "approved", key: "slk_test_key" })
         return json({ status: next })
-      }
-
-      if (url.pathname.endsWith("/desktop-sign-in")) {
-        if (body?.action === "start") {
-          const session_id = `sess_${state.connectSessions.size + 1}`
-          state.connectSessions.set(session_id, {
-            code_challenge: body.code_challenge,
-            state: body.state,
-            redirect_port: body.redirect_port,
-          })
-          state.lastCodeChallenge = body.code_challenge
-          return json({ session_id })
-        }
-        if (body?.action === "token") {
-          state.lastVerifier = body.code_verifier
-          if (!state.connectSessions.size) return json({ status: "expired" })
-          if (body.code !== "one_time_code_from_the_browser") return json({ status: "expired" })
-          return json({ status: "approved", key: "slk_test_key" })
-        }
-        return json({ error: { message: "unknown action" } }, 400)
       }
 
       if (url.pathname.endsWith("/account-status")) {
